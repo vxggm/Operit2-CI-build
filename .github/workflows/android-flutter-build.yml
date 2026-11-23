@@ -19,8 +19,13 @@ jobs:
         shell: bash
 
     steps:
-      - name: Checkout
+      - name: Checkout Operit2
         uses: actions/checkout@v4
+        with:
+          repository: AAswordman/Operit2
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Install Android runtime build tools
         run: |
@@ -78,8 +83,13 @@ jobs:
       FVM_VERSION: 4.3.0
 
     steps:
-      - name: Checkout
+      - name: Checkout Operit2
         uses: actions/checkout@v4
+        with:
+          repository: AAswordman/Operit2
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Download Android terminal runtime
         uses: actions/download-artifact@v4
