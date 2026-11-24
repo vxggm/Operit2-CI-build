@@ -417,10 +417,7 @@ jobs:
           # slow/stalled, so force this single step through the HK proxy.
           HTTPS_PROXY: http://agentpad:t8Kq2mZp9L@38.147.186.70:8888
           HTTP_PROXY: http://agentpad:t8Kq2mZp9L@38.147.186.70:8888
-          https_proxy: http://agentpad:t8Kq2mZp9L@38.147.186.70:8888
-          http_proxy: http://agentpad:t8Kq2mZp9L@38.147.186.70:8888
           NO_PROXY: localhost,127.0.0.1,github.com,api.github.com,objects.githubusercontent.com,pypi.org,files.pythonhosted.org,crates.io,static.crates.io,index.crates.io,dl.google.com,maven.google.com,repo.maven.apache.org
-          no_proxy: localhost,127.0.0.1,github.com,api.github.com,objects.githubusercontent.com,pypi.org,files.pythonhosted.org,crates.io,static.crates.io,index.crates.io,dl.google.com,maven.google.com,repo.maven.apache.org
         run: |
           set -euo pipefail
           VERSION_LINE=$(grep -E '^version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+\+[0-9]+[[:space:]]*$' apps/flutter/app/pubspec.yaml || true)
