@@ -1,4 +1,4 @@
-name: Android Flutter Build
+name: Android Flutter Build (Linux)
 
 on:
   workflow_dispatch:
@@ -77,19 +77,19 @@ jobs:
 
   build-android:
     needs: build-android-runtime
-    runs-on: windows-2025
-    timeout-minutes: 180
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
     env:
       RUSTFLAGS: -Awarnings
       RUST_TOOLCHAIN_VERSION: 1.95.0
       FVM_VERSION: 4.3.0
-      # prepare_android_v8.py calls subprocess with text=True and no encoding.
-      # On Windows that defaults to cp1252 and blows up when cargo metadata emits
-      # non-ASCII bytes (UnicodeDecodeError -> stdout None -> .strip() crash).
-      # Forcing UTF-8 mode fixes it without patching upstream sources.
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
-      PYTHONLEGACYWINDOWSSTDIO: "0"
+      LIBCLANG_PATH: /usr/lib/llvm-21/lib
+
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout Operit2
@@ -106,54 +106,10 @@ jobs:
           name: operit2-android-runtime-${{ github.sha }}
           path: apps/flutter/app/android/app/src/main
 
-      - name: Install bootstrap Dart
-        uses: dart-lang/setup-dart@v1
-        with:
-          sdk: 3.11.5
-
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24
-
-      - name: Setup Emscripten SDK
-        uses: mymindstorm/setup-emsdk@v14
-        with:
-          version: 4.0.11
-
-      - name: Create repository Python environment
-        shell: pwsh
-        run: |
-          # build-wasm.mjs hardcodes .venv/Scripts/python.exe with no fallback.
-          # Mirror the upstream prepare_python_command(): copy the running interpreter.
-          New-Item -ItemType Directory -Force -Path .venv/Scripts | Out-Null
-          $py = (Get-Command python).Source
-          Copy-Item -LiteralPath $py -Destination .venv/Scripts/python.exe -Force
-          .\.venv\Scripts\python.exe --version
-          # Confirm the Emscripten compiler is reachable via PATH (usearch/build.py checks it first)
-          $em = (Get-Command em++ -ErrorAction SilentlyContinue)
-          if (-not $em) { throw "em++ not found on PATH" }
-          $env:EMXX = $em.Source
-          "EMXX=$($em.Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          & $em.Source --version
-
-      - name: Prepare TypeScript and pnpm toolchain
-        shell: pwsh
-        run: |
-          # 1) Repository-managed TypeScript compiler (sync_plugin_packages.py checks this path first)
-          New-Item -ItemType Directory -Force -Path .ci-tools/typescript | Out-Null
-          Push-Location .ci-tools/typescript
-          npm init -y | Out-Null
-          npm install typescript@5.9.3 --no-audit --no-fund
-          Pop-Location
-          $tsc = ".ci-tools/typescript/node_modules/.bin/tsc.cmd"
-          if (-not (Test-Path -LiteralPath $tsc)) {
-            throw "TypeScript compiler was not installed at $tsc"
-          }
-          & $tsc --version
-          # 2) Corepack + pnpm 10.7.0 for the built-in plugins
-          corepack enable
-          corepack pnpm --version
 
       - name: Install Java
         uses: actions/setup-java@v4
@@ -161,15 +117,66 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Install FVM
-        shell: pwsh
+      - name: Install build dependencies
         run: |
-          dart pub global activate fvm $env:FVM_VERSION
-          "$env:APPDATA\Pub\Cache\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            cmake \
+            curl \
+            git \
+            libxml2-dev \
+            lld \
+            ninja-build \
+            pkg-config \
+            python3 \
+            python3-pip \
+            python3-venv \
+            unzip \
+            zip
+
+      - name: Install LLVM 21 (libclang >= 21 required by V8 bindgen)
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-21-dev libclang-21-dev
+          ls -l /usr/lib/llvm-21/lib/libclang.so* || true
+
+      - name: Setup Emscripten SDK
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 4.0.11
+
+      - name: Create repository Python venv
+        run: |
+          python3 -m venv .venv || { mkdir -p .venv/bin; ln -sf "$(command -v python3)" .venv/bin/python; }
+          .venv/bin/python --version
+          em++ --version | head -1
+
+      - name: Prepare TypeScript toolchain
+        run: |
+          mkdir -p .ci-tools/typescript
+          npm install --prefix .ci-tools/typescript --no-audit --no-fund typescript@5.9.3
+          .ci-tools/typescript/node_modules/.bin/tsc --version
+          corepack enable
+          corepack pnpm --version
+
+      - name: Install FVM
+        run: |
+          curl -sSL -o /tmp/dart.zip "https://storage.googleapis.com/dart-archive/channels/stable/release/3.11.5/sdk/dartsdk-linux-x64-release.zip"
+          sudo unzip -q -o /tmp/dart.zip -d /opt
+          echo "/opt/dart-sdk/bin" >> "$GITHUB_PATH"
+          sudo ln -sf /opt/dart-sdk/bin/dart /usr/local/bin/dart
+          dart --version
+          dart pub global activate fvm "$FVM_VERSION"
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+          sudo ln -sf "$HOME/.pub-cache/bin/fvm" /usr/local/bin/fvm
+          fvm --version
 
       - name: Install project Flutter SDK
         working-directory: apps/flutter/app
-        shell: pwsh
         run: fvm install --skip-pub-get
 
       - name: Install Rust
@@ -178,50 +185,26 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
           targets: aarch64-linux-android
 
-      - name: Prepare Android bindgen libclang
-        shell: pwsh
-        run: |
-          $version = "21.1.8"
-          $packageName = "libclang.runtime.win-x64.$version"
-          $toolsDir = "target/operit-build-tools"
-          $packageDir = Join-Path $toolsDir $packageName
-          $archive = Join-Path $toolsDir "$packageName.nupkg"
-          New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
-          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/libclang.runtime.win-x64/$version" -OutFile $archive
-          Expand-Archive -Path $archive -DestinationPath $packageDir -Force
-          $libclang = Join-Path $packageDir "runtimes/win-x64/native/libclang.dll"
-          if (-not (Test-Path -LiteralPath $libclang)) {
-            throw "Android bindgen libclang was not prepared at $libclang"
-          }
-
       - name: Restore Android signing material
-        shell: pwsh
         env:
           ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
           ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
           ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
           ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
         run: |
-          $required = @(
-            "ANDROID_RELEASE_KEYSTORE_BASE64",
-            "ANDROID_RELEASE_STORE_PASSWORD",
-            "ANDROID_RELEASE_KEY_ALIAS",
-            "ANDROID_RELEASE_KEY_PASSWORD"
-          )
-          $missing = $required | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) }
-          if ($missing.Count -gt 0) {
-            throw "Missing required GitHub Actions secrets: $($missing -join ', ')"
-          }
-          $secretsDir = "tools/release/secrets"
-          New-Item -ItemType Directory -Force -Path $secretsDir | Out-Null
-          $keystore = Join-Path $secretsDir "operit2-release.keystore"
-          [System.IO.File]::WriteAllBytes($keystore, [System.Convert]::FromBase64String($env:ANDROID_RELEASE_KEYSTORE_BASE64))
-          @"
-          RELEASE_STORE_FILE=operit2-release.keystore
-          RELEASE_STORE_PASSWORD=$env:ANDROID_RELEASE_STORE_PASSWORD
-          RELEASE_KEY_ALIAS=$env:ANDROID_RELEASE_KEY_ALIAS
-          RELEASE_KEY_PASSWORD=$env:ANDROID_RELEASE_KEY_PASSWORD
-          "@ | Set-Content -Path (Join-Path $secretsDir "android-signing.properties") -Encoding utf8
+          set -euo pipefail
+          for v in ANDROID_RELEASE_KEYSTORE_BASE64 ANDROID_RELEASE_STORE_PASSWORD ANDROID_RELEASE_KEY_ALIAS ANDROID_RELEASE_KEY_PASSWORD; do
+            if [ -z "${!v:-}" ]; then echo "Missing required secret: $v" >&2; exit 1; fi
+          done
+          mkdir -p tools/release/secrets
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 -d > tools/release/secrets/operit2-release.keystore
+          {
+            echo "RELEASE_STORE_FILE=operit2-release.keystore"
+            echo "RELEASE_STORE_PASSWORD=$ANDROID_RELEASE_STORE_PASSWORD"
+            echo "RELEASE_KEY_ALIAS=$ANDROID_RELEASE_KEY_ALIAS"
+            echo "RELEASE_KEY_PASSWORD=$ANDROID_RELEASE_KEY_PASSWORD"
+          } > tools/release/secrets/android-signing.properties
+          ls -l tools/release/secrets/
 
       - name: Cache source-built Android V8
         uses: actions/cache@v4
@@ -230,18 +213,22 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-android-v8-${{ hashFiles('tools/build_scripts/prepare_android_v8.py', 'apps/flutter/native/operit-flutter-bridge/Cargo.lock') }}
 
       - name: Build and package Android app
-        shell: pwsh
         run: |
-          $version = (Select-String -Path apps/flutter/app/pubspec.yaml -Pattern '^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$').Matches
-          if ($version.Count -ne 1) {
-            throw "apps/flutter/app/pubspec.yaml must contain exactly one release version line"
-          }
-          python tools/build_scripts/build_flutter_android.py --build-name $version[0].Groups[1].Value --build-number $version[0].Groups[2].Value --enforce-lockfile
+          set -euo pipefail
+          VERSION_LINE=$(grep -E '^version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+\+[0-9]+[[:space:]]*$' apps/flutter/app/pubspec.yaml || true)
+          COUNT=$(printf '%s\n' "$VERSION_LINE" | grep -c . || true)
+          if [ "$COUNT" != "1" ]; then
+            echo "pubspec.yaml must contain exactly one release version line" >&2
+            exit 1
+          fi
+          BUILD_NAME=$(printf '%s' "$VERSION_LINE" | sed -E 's#^version:[[:space:]]*([0-9.]+)\+.*#\1#')
+          BUILD_NUMBER=$(printf '%s' "$VERSION_LINE" | sed -E 's#^version:[[:space:]]*[0-9.]+\+([0-9]+).*#\1#')
+          echo "build_name=$BUILD_NAME build_number=$BUILD_NUMBER"
+          python3 tools/build_scripts/build_flutter_android.py --build-name "$BUILD_NAME" --build-number "$BUILD_NUMBER" --enforce-lockfile
 
       - name: Build and package Android module
         continue-on-error: true
-        shell: pwsh
-        run: python tools/build_scripts/build_android_module_release.py --enforce-lockfile
+        run: python3 tools/build_scripts/build_android_module_release.py --enforce-lockfile
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
