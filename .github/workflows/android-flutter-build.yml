@@ -109,6 +109,27 @@ jobs:
         with:
           node-version: 24
 
+      - name: Prepare TypeScript and pnpm toolchain
+        shell: pwsh
+        run: |
+          # 1) Repository-managed TypeScript compiler (script checks this exact path first)
+          New-Item -ItemType Directory -Force -Path .ci-tools/typescript | Out-Null
+          Push-Location .ci-tools/typescript
+          npm init -y | Out-Null
+          npm install typescript@5.9.2 --no-audit --no-fund
+          Pop-Location
+          $tsc = ".ci-tools/typescript/node_modules/.bin/tsc.cmd"
+          if (-not (Test-Path -LiteralPath $tsc)) {
+            throw "TypeScript compiler was not installed at $tsc"
+          }
+          & $tsc --version
+          # 2) Corepack + pnpm 10.7.0 for the built-in workflow plugin
+          corepack enable
+          Push-Location plugins/packages/buildin/workflow
+          corepack pnpm install --frozen-lockfile
+          Pop-Location
+          corepack pnpm --version
+
       - name: Install Java
         uses: actions/setup-java@v4
         with:
