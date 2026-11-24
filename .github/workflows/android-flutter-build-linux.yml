@@ -75,7 +75,7 @@ jobs:
               sleep $((attempt * 5))
             done
             echo "    FAILED after 6 attempts: $url" >&2
-            exit 1
+            return 1
           }
 
           fetch "https://busybox.net/downloads/busybox-1.38.0.tar.bz2" \
@@ -88,7 +88,11 @@ jobs:
             "$RT/downloads/talloc-2.4.3.tar.gz" "talloc-2.4.3"
 
           fetch "https://ftp.gnu.org/gnu/bash/bash-5.2.37.tar.gz" \
-            "$RT/downloads/bash-5.2.37.tar.gz" "bash-5.2.37"
+            "$RT/downloads/bash-5.2.37.tar.gz" "bash-gnu" || \
+          fetch "https://mirrors.kernel.org/gnu/bash/bash-5.2.37.tar.gz" \
+            "$RT/downloads/bash-5.2.37.tar.gz" "bash-kernel" || \
+          fetch "https://mirror.rackspace.com/gnu/bash/bash-5.2.37.tar.gz" \
+            "$RT/downloads/bash-5.2.37.tar.gz" "bash-rackspace"
 
           echo "==> extracting"
           rm -rf "$RT/sources"/*
