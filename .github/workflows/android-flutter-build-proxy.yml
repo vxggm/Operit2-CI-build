@@ -162,6 +162,22 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
+      - name: Install urllib proxy shim
+        run: |
+          # prepare_android_v8.py fetches the chromium sysroot with
+          # urllib.request.urlopen, which ignores HTTPS_PROXY. sitecustomize is
+          # imported at every interpreter start, so installing it there routes
+          # those downloads through the proxy without patching upstream code.
+          sudo cp ci/sitecustomize.py /usr/lib/python3/dist-packages/sitecustomize.py
+          echo "--- verify shim is picked up ---"
+          HTTPS_PROXY="${{ env.PROXY_URL }}" python3 - <<'PYEOF'
+          import os, urllib.request
+          print("env:", os.environ.get("HTTPS_PROXY"))
+          opener = urllib.request._opener
+          print("opener installed:", opener is not None)
+          print("handlers:", [type(h).__name__ for h in (opener.handlers if opener else [])])
+          PYEOF
+
       - name: Verify Hong Kong proxy reaches Google storage
         run: |
           set -euo pipefail
