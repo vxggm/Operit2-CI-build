@@ -231,9 +231,55 @@ jobs:
           sudo ln -sf "$HOME/.pub-cache/bin/fvm" /usr/local/bin/fvm
           fvm --version
 
+      - name: Configure git for flaky networks
+        run: |
+          # gitee/RPC failures show up as "curl 56 GnuTLS recv error (-110)",
+          # which is HTTP/2 multiplexing being reset mid-transfer. HTTP/1.1 plus
+          # retry settings makes the mirror-clone survive transient resets.
+          git config --global http.version HTTP/1.1
+          git config --global http.postBuffer 524288000
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
+          git config --global core.compression 0
+          git config --global http.maxRequests 1
+          git config --list --global
+
+      - name: Pre-warm gitee git dependencies
+        run: |
+          # pub get clones these with a bare `git clone --mirror` that cannot be
+          # retried from outside. Clone the mirror into the pub cache first so
+          # the later pub get resolves from the local cache.
+          set -euo pipefail
+          URL="https://gitee.com/openharmony-sig/flutter_packages.git"
+          REF="35fb467533e174411a117b2a030c15d2a3a9687c"
+          CACHE="$HOME/.pub-cache/git/cache"
+          mkdir -p "$CACHE"
+
+          for attempt in 1 2 3 4 5 6; do
+            echo "=== clone attempt $attempt ==="
+            if git clone --mirror "$URL" "$CACHE/flutter_packages-$(echo -n "$URL" | shasum -a 256 | cut -c1-40)"; then
+              echo "mirror clone ok"
+              break
+            fi
+            rm -rf "$CACHE"/flutter_packages-*
+            if [ "$attempt" = "6" ]; then
+              echo "mirror clone failed after 6 attempts" >&2
+              ls -la "$CACHE" >&2 || true
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+          ls -1 "$CACHE"
+
       - name: Install project Flutter SDK
         working-directory: apps/flutter/app
-        run: fvm install --skip-pub-get
+        run: |
+          for attempt in 1 2 3 4; do
+            echo "=== fvm install attempt $attempt ==="
+            if fvm install --skip-pub-get; then exit 0; fi
+            [ "$attempt" = "4" ] && exit 1
+            sleep 10
+          done
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
