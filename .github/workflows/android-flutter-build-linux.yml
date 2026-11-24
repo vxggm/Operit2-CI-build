@@ -198,6 +198,11 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
           sudo apt-get update
           sudo apt-get install -y llvm-21-dev libclang-21-dev
+          # Ubuntu ships libclang with SONAME 1 (libclang.so.1). V8 bindgen
+          # requires >= 21, so expose a libclang.so.21 link that matches the
+          # version-parsing regex in prepare_android_v8.py.
+          sudo ln -sf /usr/lib/llvm-21/lib/libclang.so.1 /usr/lib/llvm-21/lib/libclang.so.21
+          sudo ln -sf /usr/lib/llvm-21/lib/libclang.so.21 /usr/lib/libclang.so.21
           ls -l /usr/lib/llvm-21/lib/libclang.so* || true
 
       - name: Setup Emscripten SDK
