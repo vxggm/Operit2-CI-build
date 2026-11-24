@@ -83,6 +83,13 @@ jobs:
       RUSTFLAGS: -Awarnings
       RUST_TOOLCHAIN_VERSION: 1.95.0
       FVM_VERSION: 4.3.0
+      # prepare_android_v8.py calls subprocess with text=True and no encoding.
+      # On Windows that defaults to cp1252 and blows up when cargo metadata emits
+      # non-ASCII bytes (UnicodeDecodeError -> stdout None -> .strip() crash).
+      # Forcing UTF-8 mode fixes it without patching upstream sources.
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      PYTHONLEGACYWINDOWSSTDIO: "0"
 
     steps:
       - name: Checkout Operit2
