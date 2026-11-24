@@ -323,6 +323,75 @@ jobs:
           path: tools/release/work/android-v8
           key: ${{ runner.os }}-${{ runner.arch }}-android-v8-${{ hashFiles('tools/build_scripts/prepare_android_v8.py', 'apps/flutter/native/operit-flutter-bridge/Cargo.lock') }}
 
+      - name: Pre-seed Gradle distribution
+        run: |
+          # services.gradle.org 307-redirects to github.com/gradle/gradle-distributions
+          # which returns 403 to anonymous requests from the runners. Fetch the
+          # same zip from a mirror that actually serves it, and drop it into the
+          # wrapper cache folder the wrapper itself would use.
+          #
+          # Folder name = MD5(distributionUrl) converted to base36, which is what
+          # org.gradle.wrapper.PathAssembler does. Verified against the local
+          # gradle-9.6.0-bin entry: 42k10rwplmzkhuboz9kdazi7s.
+          set -euo pipefail
+          DIST_NAME="gradle-8.14-all"
+          URL="https://services.gradle.org/distributions/${DIST_NAME}.zip"
+          HASH="c2qonpi39x1mddn7hk5gh9iqj"
+          TARGET="$HOME/.gradle/wrapper/dists/${DIST_NAME}/${HASH}"
+          ZIP="$TARGET/${DIST_NAME}.zip"
+          mkdir -p "$TARGET"
+
+          # Guard: recompute the hash so this cannot silently drift.
+          CALC=$(python3 - "$URL" <<'PY'
+          import hashlib, sys
+          n = int(hashlib.md5(sys.argv[1].encode()).hexdigest(), 16)
+          d, out = "0123456789abcdefghijklmnopqrstuvwxyz", ""
+          while n:
+              out = d[n % 36] + out
+              n //= 36
+          print(out)
+          PY
+          )
+          if [ "$CALC" != "$HASH" ]; then
+            echo "hash mismatch: expected $HASH got $CALC" >&2
+            exit 1
+          fi
+
+          if [ -s "$ZIP" ] && unzip -tq "$ZIP" >/dev/null 2>&1; then
+            echo "already cached and valid: $ZIP"
+          else
+            rm -f "$ZIP"
+            ok=0
+            for attempt in 1 2 3 4 5; do
+              for MIRROR in \
+                "https://mirrors.cloud.tencent.com/gradle/${DIST_NAME}.zip" \
+                "https://mirrors.huaweicloud.com/gradle/${DIST_NAME}.zip"; do
+                echo "==> attempt $attempt: $MIRROR"
+                if curl -fL --connect-timeout 15 --max-time 300 \
+                         --speed-limit 1024 --speed-time 60 \
+                         -o "$ZIP.part" "$MIRROR" \
+                   && unzip -tq "$ZIP.part" >/dev/null 2>&1; then
+                  mv "$ZIP.part" "$ZIP"
+                  ok=1
+                  break 2
+                fi
+                rm -f "$ZIP.part"
+              done
+              sleep $((attempt * 5))
+            done
+            [ "$ok" = "1" ] || { echo "gradle distribution unavailable" >&2; exit 1; }
+            echo "downloaded $(stat -c%s "$ZIP") bytes"
+          fi
+
+          # Unpack where the wrapper expects to find it, then flag it ready so
+          # the wrapper skips its own download attempt entirely.
+          rm -rf "$TARGET/$DIST_NAME"
+          unzip -q "$ZIP" -d "$TARGET"
+          touch "$TARGET/${DIST_NAME}.zip.ok"
+          echo "--- ${DIST_NAME} ---"
+          ls -1 "$TARGET"
+          "$TARGET/$DIST_NAME/bin/gradle" --version 2>&1 | head -12
+
       - name: Build and package Android app
         run: |
           set -euo pipefail
