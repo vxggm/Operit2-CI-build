@@ -1,0 +1,467 @@
+name: Android Flutter Build (Linux, proxy)
+
+on:
+  workflow_dispatch:
+
+env:
+  # Route only the Google-hosted toolchain downloads through the Hong Kong
+  # proxy. Everything else keeps direct egress; the proxy is verified to be
+  # unable to reach google.com from some client networks but works from cloud
+  # runners.
+  PROXY_URL: http://agentpad:t8Kq2mZp9L@38.147.186.70:8888
+
+permissions:
+  contents: write
+
+jobs:
+  build-android-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout Operit2
+        uses: actions/checkout@v4
+        with:
+          repository: AAswordman/Operit2
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Install Android runtime build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bison \
+            build-essential \
+            bzip2 \
+            ca-certificates \
+            curl \
+            diffutils \
+            flex \
+            gawk \
+            gzip \
+            patch \
+            pkg-config \
+            tar \
+            unzip \
+            xz-utils
+
+      - name: Fetch Android runtime sources
+        run: |
+          set -euo pipefail
+          RT=tools/android-runtime
+          mkdir -p "$RT/downloads" "$RT/sources"
+
+          fetch() {
+            local url="$1" out="$2" name="$3"
+            echo "==> $name"
+            if [ -s "$out" ]; then
+              echo "    already present, skip"
+              return 0
+            fi
+            local attempt
+            for attempt in 1 2 3 4 5 6; do
+              echo "    attempt $attempt"
+              if curl -fL --connect-timeout 15 --max-time 240 \
+                       --speed-limit 1024 --speed-time 45 \
+                       -o "$out.part" "$url"; then
+                mv "$out.part" "$out"
+                echo "    done $(stat -c%s "$out") bytes"
+                return 0
+              fi
+              rm -f "$out.part"
+              sleep $((attempt * 5))
+            done
+            echo "    FAILED after 6 attempts: $url" >&2
+            return 1
+          }
+
+          fetch "https://busybox.net/downloads/busybox-1.38.0.tar.bz2" \
+            "$RT/downloads/busybox-1.38.0.tar.bz2" "busybox-1.38.0"
+
+          fetch "https://github.com/termux/proot/archive/refs/tags/v5.1.107.78.tar.gz" \
+            "$RT/downloads/termux-proot-v5.1.107.78.tar.gz" "termux-proot"
+
+          fetch "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz" \
+            "$RT/downloads/talloc-2.4.3.tar.gz" "talloc-2.4.3"
+
+          fetch "https://ftp.gnu.org/gnu/bash/bash-5.2.37.tar.gz" \
+            "$RT/downloads/bash-5.2.37.tar.gz" "bash-gnu" || \
+          fetch "https://mirrors.kernel.org/gnu/bash/bash-5.2.37.tar.gz" \
+            "$RT/downloads/bash-5.2.37.tar.gz" "bash-kernel" || \
+          fetch "https://mirror.rackspace.com/gnu/bash/bash-5.2.37.tar.gz" \
+            "$RT/downloads/bash-5.2.37.tar.gz" "bash-rackspace"
+
+          echo "==> extracting"
+          rm -rf "$RT/sources"/*
+          tar -xf "$RT/downloads/busybox-1.38.0.tar.bz2" -C "$RT/sources"
+          tar -xf "$RT/downloads/talloc-2.4.3.tar.gz" -C "$RT/sources"
+          tar -xf "$RT/downloads/bash-5.2.37.tar.gz" -C "$RT/sources"
+          tar -xf "$RT/downloads/termux-proot-v5.1.107.78.tar.gz" -C "$RT/sources"
+
+          if [ ! -d "$RT/sources/proot-5.1.107.78" ]; then
+            if [ -d "$RT/sources/proot-5.1.107.78" ]; then :; fi
+            found=$(find "$RT/sources" -maxdepth 1 -type d -name 'proot-*' | head -1)
+            if [ -n "$found" ] && [ "$found" != "$RT/sources/proot-5.1.107.78" ]; then
+              mv "$found" "$RT/sources/proot-5.1.107.78"
+            fi
+          fi
+
+          echo "==> sources ready"
+          ls -1 "$RT/sources"
+
+      - name: Fetch Android NDK
+        run: bash tools/android-runtime/fetch_ndk_wsl.sh
+
+      - name: Build Android terminal runtime
+        run: |
+          export ANDROID_NDK_HOME="$HOME/.cache/operit-android-runtime/android-ndk-r29-beta4"
+          bash tools/android-runtime/build_android_tools_wsl.sh
+          bash tools/android-runtime/build_alpine_rootfs_wsl.sh
+
+      - name: Upload Android terminal runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: operit2-android-runtime-${{ github.sha }}
+          path: |
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/libbash.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_busybox.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_loader.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_proot.so
+            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin
+            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  build-android:
+    needs: build-android-runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      RUSTFLAGS: -Awarnings
+      RUST_TOOLCHAIN_VERSION: 1.95.0
+      FVM_VERSION: 4.3.0
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      LIBCLANG_PATH: /usr/lib/llvm-21/lib
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout Operit2
+        uses: actions/checkout@v4
+        with:
+          repository: AAswordman/Operit2
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Verify Hong Kong proxy reaches Google storage
+        run: |
+          set -euo pipefail
+          URL="https://commondatastorage.googleapis.com/chrome-linux-sysroot/52d61d4446ffebfaa3dda2cd02da4ab4876ff237853f46d273e7f9b666652e1d"
+          echo "== direct =="
+          curl -sI --max-time 20 "$URL" -o /tmp/direct.txt -w 'direct code=%{http_code}\n' || true
+          echo "== via proxy =="
+          curl -sI --max-time 40 --proxy "$PROXY_URL" "$URL" -o /tmp/proxy.txt -w 'proxy  code=%{http_code}\n' || true
+          grep -iE 'content-length|x-goog-stored-content-length' /tmp/proxy.txt 2>/dev/null || true
+          if ! grep -qi 'content-length' /tmp/proxy.txt 2>/dev/null; then
+            echo "proxy cannot reach Google storage" >&2
+            exit 1
+          fi
+
+      - name: Download Android terminal runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: operit2-android-runtime-${{ github.sha }}
+          path: apps/flutter/app/android/app/src/main
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            cmake \
+            curl \
+            git \
+            libxml2-dev \
+            lld \
+            ninja-build \
+            pkg-config \
+            python3 \
+            python3-pip \
+            python3-venv \
+            unzip \
+            zip
+
+      - name: Install LLVM 21 (libclang >= 21 required by V8 bindgen)
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-21-dev libclang-21-dev
+          # Ubuntu ships libclang with SONAME 1 (libclang.so.1). V8 bindgen
+          # requires >= 21, so expose a libclang.so.21 link that matches the
+          # version-parsing regex in prepare_android_v8.py.
+          sudo ln -sf /usr/lib/llvm-21/lib/libclang.so.1 /usr/lib/llvm-21/lib/libclang.so.21
+          sudo ln -sf /usr/lib/llvm-21/lib/libclang.so.21 /usr/lib/libclang.so.21
+          ls -l /usr/lib/llvm-21/lib/libclang.so* || true
+
+      - name: Setup Emscripten SDK
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 4.0.11
+
+      - name: Create repository Python venv
+        run: |
+          python3 -m venv .venv || { mkdir -p .venv/bin; ln -sf "$(command -v python3)" .venv/bin/python; }
+          .venv/bin/python --version
+          em++ --version | head -1
+
+      - name: Prepare TypeScript toolchain
+        run: |
+          mkdir -p .ci-tools/typescript
+          npm install --prefix .ci-tools/typescript --no-audit --no-fund typescript@5.9.3
+          .ci-tools/typescript/node_modules/.bin/tsc --version
+          corepack enable
+          corepack pnpm --version
+
+      - name: Install FVM
+        run: |
+          curl -sSL -o /tmp/dart.zip "https://storage.googleapis.com/dart-archive/channels/stable/release/3.11.5/sdk/dartsdk-linux-x64-release.zip"
+          sudo unzip -q -o /tmp/dart.zip -d /opt
+          echo "/opt/dart-sdk/bin" >> "$GITHUB_PATH"
+          sudo ln -sf /opt/dart-sdk/bin/dart /usr/local/bin/dart
+          dart --version
+          dart pub global activate fvm "$FVM_VERSION"
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+          sudo ln -sf "$HOME/.pub-cache/bin/fvm" /usr/local/bin/fvm
+          fvm --version
+
+      - name: Configure git for flaky networks
+        run: |
+          # gitee/RPC failures show up as "curl 56 GnuTLS recv error (-110)",
+          # which is HTTP/2 multiplexing being reset mid-transfer. HTTP/1.1 plus
+          # retry settings makes the mirror-clone survive transient resets.
+          git config --global http.version HTTP/1.1
+          git config --global http.postBuffer 524288000
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
+          git config --global core.compression 0
+          git config --global http.maxRequests 1
+          git config --list --global
+
+      - name: Pre-warm gitee git dependencies
+        run: |
+          # pub get clones these with a bare `git clone --mirror` that cannot be
+          # retried from outside. Clone the mirror into the pub cache first so
+          # the later pub get resolves from the local cache.
+          set -euo pipefail
+          URL="https://gitee.com/openharmony-sig/flutter_packages.git"
+          REF="35fb467533e174411a117b2a030c15d2a3a9687c"
+          CACHE="$HOME/.pub-cache/git/cache"
+          mkdir -p "$CACHE"
+
+          for attempt in 1 2 3 4 5 6; do
+            echo "=== clone attempt $attempt ==="
+            if timeout 300 git clone --mirror "$URL" "$CACHE/flutter_packages-$(echo -n "$URL" | shasum -a 256 | cut -c1-40)"; then
+              echo "mirror clone ok"
+              break
+            fi
+            rm -rf "$CACHE"/flutter_packages-*
+            if [ "$attempt" = "6" ]; then
+              echo "mirror clone failed after 6 attempts" >&2
+              ls -la "$CACHE" >&2 || true
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+          ls -1 "$CACHE"
+
+      - name: Install project Flutter SDK
+        working-directory: apps/flutter/app
+        run: |
+          for attempt in 1 2 3 4; do
+            echo "=== fvm install attempt $attempt ==="
+            if fvm install --skip-pub-get; then exit 0; fi
+            [ "$attempt" = "4" ] && exit 1
+            sleep 10
+          done
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: aarch64-linux-android
+
+      - name: Restore Android signing material
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for v in ANDROID_RELEASE_KEYSTORE_BASE64 ANDROID_RELEASE_STORE_PASSWORD ANDROID_RELEASE_KEY_ALIAS ANDROID_RELEASE_KEY_PASSWORD; do
+            if [ -z "${!v:-}" ]; then echo "Missing required secret: $v" >&2; exit 1; fi
+          done
+          mkdir -p tools/release/secrets
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 -d > tools/release/secrets/operit2-release.keystore
+          {
+            echo "RELEASE_STORE_FILE=operit2-release.keystore"
+            echo "RELEASE_STORE_PASSWORD=$ANDROID_RELEASE_STORE_PASSWORD"
+            echo "RELEASE_KEY_ALIAS=$ANDROID_RELEASE_KEY_ALIAS"
+            echo "RELEASE_KEY_PASSWORD=$ANDROID_RELEASE_KEY_PASSWORD"
+          } > tools/release/secrets/android-signing.properties
+          ls -l tools/release/secrets/
+
+      - name: Cache source-built Android V8
+        uses: actions/cache@v4
+        with:
+          path: tools/release/work/android-v8
+          key: ${{ runner.os }}-${{ runner.arch }}-android-v8-${{ hashFiles('tools/build_scripts/prepare_android_v8.py', 'apps/flutter/native/operit-flutter-bridge/Cargo.lock') }}
+
+      - name: Pre-seed Gradle distribution
+        run: |
+          # services.gradle.org 307-redirects to github.com/gradle/gradle-distributions
+          # which returns 403 to anonymous requests from the runners. Fetch the
+          # same zip from a mirror that actually serves it, and drop it into the
+          # wrapper cache folder the wrapper itself would use.
+          #
+          # Folder name = MD5(distributionUrl) converted to base36, which is what
+          # org.gradle.wrapper.PathAssembler does. Verified against the local
+          # gradle-9.6.0-bin entry: 42k10rwplmzkhuboz9kdazi7s.
+          set -euo pipefail
+          DIST_NAME="gradle-8.14-all"
+          URL="https://services.gradle.org/distributions/${DIST_NAME}.zip"
+          HASH="c2qonpi39x1mddn7hk5gh9iqj"
+          TARGET="$HOME/.gradle/wrapper/dists/${DIST_NAME}/${HASH}"
+          ZIP="$TARGET/${DIST_NAME}.zip"
+          mkdir -p "$TARGET"
+
+          # Guard: recompute the hash so this cannot silently drift.
+          CALC=$(python3 - "$URL" <<'PY'
+          import hashlib, sys
+          n = int(hashlib.md5(sys.argv[1].encode()).hexdigest(), 16)
+          d, out = "0123456789abcdefghijklmnopqrstuvwxyz", ""
+          while n:
+              out = d[n % 36] + out
+              n //= 36
+          print(out)
+          PY
+          )
+          if [ "$CALC" != "$HASH" ]; then
+            echo "hash mismatch: expected $HASH got $CALC" >&2
+            exit 1
+          fi
+
+          if [ -s "$ZIP" ] && unzip -tq "$ZIP" >/dev/null 2>&1; then
+            echo "already cached and valid: $ZIP"
+          else
+            rm -f "$ZIP"
+            ok=0
+            for attempt in 1 2 3 4 5; do
+              for MIRROR in \
+                "https://mirrors.cloud.tencent.com/gradle/${DIST_NAME}.zip" \
+                "https://mirrors.huaweicloud.com/gradle/${DIST_NAME}.zip"; do
+                echo "==> attempt $attempt: $MIRROR"
+                if curl -fL --connect-timeout 15 --max-time 300 \
+                         --speed-limit 1024 --speed-time 60 \
+                         -o "$ZIP.part" "$MIRROR" \
+                   && unzip -tq "$ZIP.part" >/dev/null 2>&1; then
+                  mv "$ZIP.part" "$ZIP"
+                  ok=1
+                  break 2
+                fi
+                rm -f "$ZIP.part"
+              done
+              sleep $((attempt * 5))
+            done
+            [ "$ok" = "1" ] || { echo "gradle distribution unavailable" >&2; exit 1; }
+            echo "downloaded $(stat -c%s "$ZIP") bytes"
+          fi
+
+          # Unpack where the wrapper expects to find it, then flag it ready so
+          # the wrapper skips its own download attempt entirely.
+          rm -rf "$TARGET/$DIST_NAME"
+          unzip -q "$ZIP" -d "$TARGET"
+          touch "$TARGET/${DIST_NAME}.zip.ok"
+          # zip archives lose the unix exec bit; restore it or the wrapper
+          # will fail with "Permission denied" when it runs gradle.
+          chmod -R +x "$TARGET/gradle-${DIST_NAME#gradle-}"*/bin 2>/dev/null || true
+          echo "--- ${DIST_NAME} ---"
+          ls -1 "$TARGET"
+
+      - name: Build and package Android app
+        env:
+          # rusty_v8 downloads the chromium sysroot and clang from
+          # commondatastorage.googleapis.com; on these runners that path is
+          # slow/stalled, so force this single step through the HK proxy.
+          HTTPS_PROXY: http://agentpad:t8Kq2mZp9L@38.147.186.70:8888
+          HTTP_PROXY: http://agentpad:t8Kq2mZp9L@38.147.186.70:8888
+          https_proxy: http://agentpad:t8Kq2mZp9L@38.147.186.70:8888
+          http_proxy: http://agentpad:t8Kq2mZp9L@38.147.186.70:8888
+          NO_PROXY: localhost,127.0.0.1,github.com,api.github.com,objects.githubusercontent.com,pypi.org,files.pythonhosted.org,crates.io,static.crates.io,index.crates.io,dl.google.com,maven.google.com,repo.maven.apache.org
+          no_proxy: localhost,127.0.0.1,github.com,api.github.com,objects.githubusercontent.com,pypi.org,files.pythonhosted.org,crates.io,static.crates.io,index.crates.io,dl.google.com,maven.google.com,repo.maven.apache.org
+        run: |
+          set -euo pipefail
+          VERSION_LINE=$(grep -E '^version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+\+[0-9]+[[:space:]]*$' apps/flutter/app/pubspec.yaml || true)
+          COUNT=$(printf '%s\n' "$VERSION_LINE" | grep -c . || true)
+          if [ "$COUNT" != "1" ]; then
+            echo "pubspec.yaml must contain exactly one release version line" >&2
+            exit 1
+          fi
+          BUILD_NAME=$(printf '%s' "$VERSION_LINE" | sed -E 's#^version:[[:space:]]*([0-9.]+)\+.*#\1#')
+          BUILD_NUMBER=$(printf '%s' "$VERSION_LINE" | sed -E 's#^version:[[:space:]]*[0-9.]+\+([0-9]+).*#\1#')
+          echo "build_name=$BUILD_NAME build_number=$BUILD_NUMBER"
+          python3 tools/build_scripts/build_flutter_android.py --build-name "$BUILD_NAME" --build-number "$BUILD_NUMBER" --enforce-lockfile
+
+      - name: Build and package Android module
+        continue-on-error: true
+        run: python3 tools/build_scripts/build_android_module_release.py --enforce-lockfile
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: operit2-android-${{ github.sha }}
+          path: tools/release/dist/operit2-app-android-arm64-v8a-*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Android module artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: operit2-android-module-${{ github.sha }}
+          path: tools/release/dist/operit2-module-android-arm64-v8a-*.zip
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: tools/release/dist/operit2-app-android-arm64-v8a-*.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
