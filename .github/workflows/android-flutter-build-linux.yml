@@ -388,9 +388,11 @@ jobs:
           rm -rf "$TARGET/$DIST_NAME"
           unzip -q "$ZIP" -d "$TARGET"
           touch "$TARGET/${DIST_NAME}.zip.ok"
+          # zip archives lose the unix exec bit; restore it or the wrapper
+          # will fail with "Permission denied" when it runs gradle.
+          chmod -R +x "$TARGET/gradle-${DIST_NAME#gradle-}"*/bin 2>/dev/null || true
           echo "--- ${DIST_NAME} ---"
           ls -1 "$TARGET"
-          "$TARGET/$DIST_NAME/bin/gradle" --version 2>&1 | head -12
 
       - name: Build and package Android app
         run: |
