@@ -109,6 +109,17 @@ jobs:
         with:
           node-version: 24
 
+      - name: Setup Emscripten SDK
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      - name: Create repository Python virtualenv
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe --version
+
       - name: Prepare TypeScript and pnpm toolchain
         shell: pwsh
         run: |
